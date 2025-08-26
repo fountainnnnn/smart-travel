@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "FastAPI (Uvicorn)",
+      "type": "python",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": [
+        "src.serving.app:app",   // <— THIS is the important bit
+        "--host", "127.0.0.1",
+        "--port", "8000",
+        "--reload"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Run src.main",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "src.main",
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}
