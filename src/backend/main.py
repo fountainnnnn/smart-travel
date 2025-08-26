@@ -1,6 +1,8 @@
 import os
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
+from datetime import datetime
+import math
 
 import httpx
 from fastapi import FastAPI, Request, Query
@@ -58,6 +60,42 @@ class WeatherOut(BaseModel):
 # -----------------------
 # Helpers
 # -----------------------
+
+def parse_eta_iso(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        # Format like 2024-08-14T16:41:48+08:00
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+def minutes_from_now(when: Optional[datetime]) -> Optional[int]:
+    if not when:
+        return None
+    now = datetime.now(when.tzinfo or timezone.utc)
+    delta = (when - now).total_seconds()
+    if delta < 0:
+        return 0
+    # LTA advises rounding down to nearest minute
+    return math.floor(delta / 60)
+
+def norm_bus(bus: Dict[str, Any]) -> Dict[str, Any]:
+    eta = parse_eta_iso(bus.get("EstimatedArrival"))
+    return {
+        "origin_code": bus.get("OriginCode"),
+        "destination_code": bus.get("DestinationCode"),
+        "estimated_arrival": bus.get("EstimatedArrival"),  # ISO string from LTA
+        "eta_min": minutes_from_now(eta),
+        "monitored": bus.get("Monitored"),
+        "load": bus.get("Load"),         # SEA | SDA | LSD
+        "feature": bus.get("Feature"),   # WAB or blank
+        "type": bus.get("Type"),         # SD | DD | BD
+        "lat": bus.get("Latitude"),
+        "lng": bus.get("Longitude"),
+        "visit_number": bus.get("VisitNumber"),
+    }
+    
 def now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -419,6 +457,61 @@ async def mrt_crowd_forecast(line: str = Query("NSL", min_length=2, max_length=5
         "updated_at": now_utc_iso(),
         "forecast": out
     }
+
+# Bus arrival times
+
+@app.get("/bus/arrivals")
+async def bus_arrivals(stop: str, service: Optional[str] = None):
+    """
+    Example:
+      /bus/arrivals?stop=83139
+      /bus/arrivals?stop=83139&service=15
+    """
+    if not LTA_API_KEY:
+        return {
+            "ok": False,
+            "error": "missing_key",
+            "detail": "Set LTA_API_KEY in backend/.env",
+        }
+
+    url = f"{LTA_API_BASE}/v3/BusArrival"
+    headers = {"AccountKey": LTA_API_KEY, "accept": "application/json"}
+    params = {"BusStopCode": stop}
+    if service:
+        params["ServiceNo"] = service
+
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT, headers=headers) as client:
+            r = await client.get(url, params=params)
+            if r.status_code != 200:
+                return {"ok": False, "status": r.status_code, "body": r.text[:800]}
+            data = r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    services = data.get("Services") or []
+    out: List[Dict[str, Any]] = []
+    for s in services:
+        next_bus = s.get("NextBus") or {}
+        next_bus2 = s.get("NextBus2") or {}
+        next_bus3 = s.get("NextBus3") or {}
+
+        row = {
+            "service_no": s.get("ServiceNo"),
+            "operator": s.get("Operator"),
+            "next": norm_bus(next_bus),
+            "next2": norm_bus(next_bus2),
+            "next3": norm_bus(next_bus3),
+        }
+        out.append(row)
+
+    return {
+        "ok": True,
+        "bus_stop_code": data.get("BusStopCode") or stop,
+        "updated_at": now_utc_iso(),
+        "services": out,
+    }
+
 
 # -----------------------
 # Entrypoint
